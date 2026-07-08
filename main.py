@@ -4,37 +4,26 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from app.diff_handler import read_diff_files, validate_diff
+from app.llm_client import get_ai_review
 from app.prompt_builder import build_review_prompt
 
-# Read .env file
-load_dotenv()
-
-llm_key = os.getenv("LLM_API_KEY")
-llm_model = os.getenv("LLM_MODEL")
-llm_base_url = os.getenv("LLM_BASE_URL")
-
-# Load and validate diff text
+# 1. Validate diff text
 diff_text = read_diff_files("tests/fixtures/sample_diff.txt")
-try:
-    validate_diff(diff_text)
-    prompt = build_review_prompt(diff_text) # Builiding review prompt (should not run if validate diff fails)
-except ValueError as e:
-    print(e)
+validate_diff(diff_text)
 
-# Initialize the OpenAI client (pointing to Grok)
-client = OpenAI(
-    api_key=llm_key,
-    base_url=llm_base_url
-)
+# 2. Build prompt
+prompt = build_review_prompt(diff_text)
 
-# Hardcoded request to send to chat bot
-response = client.chat.completions.create(
-    model=llm_model,
-    messages=[
-        {"role": "user", "content": prompt}
-    ],
-    temperature=0.7
-)
+# 3. Get review (this is your new function)
+review_dict = get_ai_review(prompt)
 
-# reponse from Grok
-print(response.choices[0].message.content)
+# 4. Prove it's a dictionary by printing a specific key
+print("Summary:", review_dict["summary"])
+print("Bugs found:", len(review_dict["bugs"]))
+if len(review_dict["bugs"]) > 0:
+    print("Bugs found:", review_dict["bugs"])
+if len(review_dict["readability_issues"]) > 0:
+    print("Readability issues:", review_dict["readability_issues"])
+if len(review_dict["security_concerns"]) > 0:
+    print("Security concerns:", review_dict["security_concerns"])
+print("Suggestions:", review_dict["suggestions"])
