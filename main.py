@@ -3,6 +3,8 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from app.diff_handler import read_diff_files, validate_diff
+
 # Read .env file
 load_dotenv()
 
@@ -27,3 +29,20 @@ response = client.chat.completions.create(
 
 # reponse from Grok
 print(response.choices[0].message.content)
+
+file=read_diff_files("tests/fixtures/sample_diff.txt")
+
+try:
+    print(validate_diff(file))
+except ValueError as e:
+    print(e)
+    
+try:
+    print(validate_diff(""))
+except ValueError as e:
+    print(e)
+
+try:
+    print(validate_diff("x" * 10000))
+except ValueError as e:
+    print(e)
