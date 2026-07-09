@@ -27,3 +27,42 @@ DO NOT include any text outside the JSON object. Make sure the json isn't wrappe
 Diff: {diff_text}
 """
     return prompt
+
+def format_review_comment(review_dict: dict) -> str:
+    """Converts the AI review dictionary into a GitHub Markdown comment."""
+    
+    comment = f"## AI Code Review\n\n"
+    comment += f"**Summary:** {review_dict.get('summary', 'No summary provided.')}\n\n"
+    
+    # Format Bugs
+    bugs = review_dict.get('bugs', [])
+    if bugs:
+        comment += "### Bugs & Edge Cases\n"
+        for bug in bugs:
+            comment += f"- {bug}\n"
+        comment += "\n"
+        
+    # Format Readability
+    readability = review_dict.get('readability_issues', [])
+    if readability:
+        comment += "### Readability\n"
+        for issue in readability:
+            comment += f"- {issue}\n"
+        comment += "\n"
+        
+    # Format Security
+    security = review_dict.get('security_concerns', [])
+    if security:
+        comment += "### Security Concerns\n"
+        for concern in security:
+            comment += f"- {concern}\n"
+        comment += "\n"
+        
+    # Format Suggestions
+    suggestions = review_dict.get('suggestions', [])
+    if suggestions:
+        comment += "### Suggestions\n"
+        for suggestion in suggestions:
+            comment += f"- {suggestion}\n"
+            
+    return comment
