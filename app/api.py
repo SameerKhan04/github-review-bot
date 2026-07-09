@@ -3,9 +3,9 @@ import json
 from flask import Flask, jsonify, request
 
 from app.diff_handler import validate_diff
-from app.github_client import get_pr_diff
+from app.github_client import get_pr_diff, post_pr_comment
 from app.llm_client import get_ai_review
-from app.prompt_builder import build_review_prompt
+from app.prompt_builder import build_review_prompt, format_review_comment
 
 # Initialise the Flask application
 app = Flask(__name__)
@@ -48,8 +48,18 @@ def handle_review():
         prompt = build_review_prompt(diff_text)
         review_dict = get_ai_review(prompt)
         
-        # Print success to the terminal
-        print("SUCCESS! Generated Review Summary:", review_dict["summary"])
+        # Format the review into Markdown
+        comment_body = format_review_comment(review_dict)
+        
+        # Extract the comments URL from the webhook payload
+        comments_url = pr_data.get('comments_url')
+        if not comments_url:
+            return jsonify({"error": "No comments_url found"}), 400
+            
+        # Post to Github
+        post_pr_comment(comments_url, comment_body)
+        
+        print("SUCCESS! Posted review to GitHub.")
         return jsonify({"status": "success"}), 200
 
     except ValueError as e:
