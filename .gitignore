@@ -8,3 +8,4 @@ logs/*.log
 dist/
 .pytest_cache/
 reviews.db
+*.pem
