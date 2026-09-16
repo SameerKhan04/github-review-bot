@@ -1,76 +1,146 @@
 import json
+import logging
 
 from flask import Flask, jsonify, request
 
-from app.database import save_review
+import app.logging_setup  # noqa: F401
+from app.database import init_db, save_review
 from app.diff_handler import validate_diff
+from app.github_app_auth import get_github_token
 from app.github_client import get_pr_diff, post_pr_comment
 from app.llm_client import get_ai_review
 from app.prompt_builder import build_review_prompt, format_review_comment
+from app.webhook_security import verify_github_signature
 
-# Initialise the Flask application
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 
-# Define the endpoint and allowed HTTP methods
-@app.route('/review', methods=['POST'])
-def handle_review():
-    try:
-        # Identify the GitHub event type
-        event_type = request.headers.get('X-GitHub-Event')
-        data = request.get_json()
+REVIEWABLE_PR_ACTIONS = {"opened", "synchronize", "reopened"}
 
-        # Handle the initial GitHub ping
-        if event_type == 'ping':
+
+@app.route("/health", methods=["GET"])
+def health():
+    try:
+        init_db()
+    except Exception:
+        logger.exception("Health check could not initialize the database")
+        return jsonify({"status": "error"}), 503
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route("/review", methods=["POST"])
+def handle_review():
+    raw_body = request.get_data() or b""
+
+    try:
+        verify_github_signature(
+            raw_body, request.headers.get("X-Hub-Signature-256")
+        )
+    except PermissionError as exc:
+        logger.warning("Rejected webhook: %s", exc)
+        return jsonify({"error": str(exc)}), 401
+
+    try:
+        data = json.loads(raw_body.decode("utf-8") or "{}") if raw_body else {}
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON payload"}), 400
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON payload must be an object"}), 400
+
+    event_type = request.headers.get("X-GitHub-Event")
+
+    try:
+        if event_type == "ping":
+            logger.info("Received GitHub ping")
             return jsonify({"status": "ping received successfully"}), 200
 
-        # We only care about Pull Request events
-        if event_type != 'pull_request':
+        if event_type == "installation":
+            return _handle_installation_event(data)
+
+        if event_type != "pull_request":
+            logger.info("Ignoring GitHub event type=%s", event_type)
             return jsonify({"status": "ignored event type"}), 200
 
-        # We only want to review when a PR is OPENED or SYNCHRONIZED (updated)
-        action = data.get('action')
-        if action not in ['opened', 'synchronize', 'reopened']:
-            return jsonify({"status": "ignored PR action"}), 200
-        
-        # Get the URL for the diff from the payload
-        pr_data = data.get('pull_request', {})
-        diff_url = pr_data.get('diff_url')
-        
-        if not diff_url:
-            return jsonify({"error": "No diff_url found"}), 400
+        return _handle_pull_request_event(data)
 
-        # Fetch the actual diff text from GitHub
-        diff_text = get_pr_diff(diff_url)
-        
-        # Validate it
-        validate_diff(diff_text)
-        
-        # Build prompt and get AI review
-        prompt = build_review_prompt(diff_text)
-        review_dict = get_ai_review(prompt)
-        
-        # Format the review into Markdown
-        comment_body = format_review_comment(review_dict)
-        
-        # Extract the comments URL from the webhook payload
-        comments_url = pr_data.get('comments_url')
-        if not comments_url:
-            return jsonify({"error": "No comments_url found"}), 400
-            
-        # Post to Github
-        post_pr_comment(comments_url, comment_body)
-        
-        print("SUCCESS! Posted review to GitHub.")
-        return jsonify({"status": "success"}), 200
-
-        # Save to Database
-        pr_html_url = pr_data.get('html_url')
-        save_review(pr_html_url, review_dict)
-        
-    except ValueError as e:
-        # Catch validation errors and return a 400 Bad Request
-        return jsonify({"error": str(e)}), 400
-        
-    except Exception as e:
-        # Catch unexpected errors and return a 500 Internal Server Error
+    except ValueError as exc:
+        logger.warning("Review request rejected: %s", exc)
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        logger.exception("Unhandled error processing webhook")
         return jsonify({"error": "An internal server error occurred"}), 500
+
+
+def _handle_installation_event(data: dict):
+    action = data.get("action")
+    installation = data.get("installation") or {}
+    installation_id = installation.get("id")
+    account = (installation.get("account") or {}).get("login")
+    repositories = [
+        repo.get("full_name")
+        for repo in data.get("repositories") or []
+        if repo.get("full_name")
+    ]
+    logger.info(
+        "GitHub App installation event action=%s installation_id=%s account=%s repos=%s",
+        action,
+        installation_id,
+        account,
+        repositories,
+    )
+    return jsonify({
+        "status": "installation event recorded",
+        "action": action,
+        "installation_id": installation_id,
+    }), 200
+
+
+def _handle_pull_request_event(data: dict):
+    action = data.get("action")
+    if action not in REVIEWABLE_PR_ACTIONS:
+        logger.info("Ignoring pull_request action=%s", action)
+        return jsonify({"status": "ignored PR action"}), 200
+
+    pr_data = data.get("pull_request") or {}
+    repo = data.get("repository") or {}
+    installation_id = (data.get("installation") or {}).get("id")
+    repo_full_name = repo.get("full_name")
+    pr_number = pr_data.get("number")
+
+    logger.info(
+        "Reviewing pull request repo=%s number=%s action=%s installation_id=%s",
+        repo_full_name,
+        pr_number,
+        action,
+        installation_id,
+    )
+
+    diff_url = pr_data.get("diff_url")
+    if not diff_url:
+        return jsonify({"error": "No diff_url found"}), 400
+
+    comments_url = pr_data.get("comments_url")
+    if not comments_url:
+        return jsonify({"error": "No comments_url found"}), 400
+
+    token = get_github_token(installation_id)
+    diff_text = get_pr_diff(diff_url, token=token)
+    validate_diff(diff_text)
+
+    prompt = build_review_prompt(diff_text)
+    review_dict = get_ai_review(prompt)
+    comment_body = format_review_comment(review_dict)
+
+    post_pr_comment(comments_url, comment_body, token=token)
+
+    pr_html_url = pr_data.get("html_url") or ""
+    save_review(pr_html_url, review_dict)
+
+    logger.info(
+        "Posted review for repo=%s number=%s",
+        repo_full_name,
+        pr_number,
+    )
+    return jsonify({"status": "success"}), 200

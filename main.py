@@ -1,11 +1,16 @@
 from dotenv import load_dotenv
 
-from app.api import app
-from app.database import init_db
-
-# Load environment variables before the app starts
 load_dotenv()
 
-if __name__ == '__main__':
-    init_db()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+import app.logging_setup  # noqa: E402,F401
+from app.api import app  # noqa: E402
+from app.database import init_db  # noqa: E402
+
+init_db()
+
+if __name__ == "__main__":
+    import os
+
+    debug = os.getenv("FLASK_DEBUG", "0") == "1"
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=debug)
